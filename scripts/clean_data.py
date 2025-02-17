@@ -2,13 +2,13 @@
 import pandas as pd
 import argparse
 from pathlib import Path
+import pickle
+import numpy as np
 
 
-def load_and_clean_files(benign_path, ransom_path):
-    """
-    Demonstrates cleaning raw data files without any feature engineering
-    Returns cleaned DataFrames for benign and ransomware samples separately
-    """
+def clean_single_file(df, is_benign=True):
+    """Cleans an individual file (benign or ransomware)"""
+    # Convert Persian numbers in critical columns
     # Persian digit conversion mapping
     persian_map = {
         "۰": "0",
@@ -22,87 +22,95 @@ def load_and_clean_files(benign_path, ransom_path):
         "۸": "8",
         "۹": "9",
     }
+    numeric_cols = ["ID", "CUCKOO_ID", "MALICIOUS", "DOWNLOADED"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str).str.strip('"').replace(persian_map, regex=True)
+            )
 
-    def clean_single_file(df):
-        """Cleaning operations for individual files"""
-        # Convert Persian numbers in critical columns
-        numeric_cols = ["ID", "CUCKOO_ID", "MALICIOUS", "DOWNLOADED"]
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = (
-                    df[col].astype(str).str.strip('"').replace(persian_map, regex=True)
-                )
-                # Handle empty strings before conversion
-                df[col] = df[col].replace("", "0")
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col].replace("", "0"), errors="coerce")
 
-        # Clean text columns
-        text_cols = ["NAME", "LOCATION", "CATEGORY"]
-        for col in text_cols:
-            if col in df.columns:
-                # Remove quotes and extract filename from path
-                df[col] = (
-                    df[col]
-                    .astype(str)
-                    .str.strip('"')
-                    .str.split("\\")
-                    .str[-1]  # Extract filename from Windows path
-                    .str.split("/")
-                    .str[-1]  # Extract filename from Unix path
-                )
+    # Clean text columns
+    text_cols = ["NAME", "LOCATION", "CATEGORY"]
+    for col in text_cols:
+        if col in df.columns:
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.strip('"')
+                .str.split("\\")
+                .str[-1]  # Windows path
+                .str.split("/")
+                .str[-1]
+            )  # Unix path
 
-        # Ensure MALICIOUS column exists
-        if "MALICIOUS" not in df.columns:
-            df["MALICIOUS"] = 0 if "benign" in str(benign_path).lower() else 1
-
-        return df
-
-    # Load and clean both datasets separately
-    benign_df = clean_single_file(pd.read_csv(benign_path))
-    ransom_df = clean_single_file(pd.read_csv(ransom_path))
-
-    return benign_df, ransom_df
+    # Set MALICIOUS flag
+    df["MALICIOUS"] = 0 if is_benign else 1
+    return df
 
 
-def save_cleaned_data(benign_df, ransom_df, output_dir):
-    """Save cleaned data to CSV for inspection"""
+def load_and_clean_files(benign_path, ransom_path):
+    """
+    Loads, cleans, and combines the benign and ransomware datasets.
+    Returns a single cleaned and shuffled DataFrame.
+    """
+    # Load and clean both datasets
+    benign_df = clean_single_file(pd.read_csv(benign_path), is_benign=True)
+    ransom_df = clean_single_file(pd.read_csv(ransom_path), is_benign=False)
+
+    # Combine and shuffle
+    combined_df = pd.concat([benign_df, ransom_df], ignore_index=True)
+    return combined_df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+def save_cleaned_data(combined_df, output_dir):
+    """
+    Saves the cleaned and combined data to both CSV and pickle formats.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    benign_df.to_csv(output_dir / "cleaned_benign.csv", index=False)
-    ransom_df.to_csv(output_dir / "cleaned_ransom.csv", index=False)
+    # Save to CSV
+    csv_path = output_dir / "cleaned_combined_data.csv"
+    combined_df.to_csv(csv_path, index=False)
+
+    # Save to pickle
+    pickle_path = output_dir / "cleaned_combined_data.pkl"
+    with open(pickle_path, "wb") as f:
+        pickle.dump(combined_df, f)
+
+    print(f"\nCleaned data saved to:")
+    print(f"- CSV: {csv_path}")
+    print(f"- Pickle: {pickle_path}")
 
 
 def cleaning_demo(input_dir, output_dir):
-    """Demonstration of cleaning functionality with sample data"""
+    """Demonstrates the cleaning and combining process"""
     input_path = Path(input_dir)
-    print("\n=== Raw Data Demonstration ===")
 
     # Show before cleaning
     raw_benign = pd.read_csv(input_path / "benign.csv").head(3)
     raw_ransom = pd.read_csv(input_path / "ransom.csv").head(3)
 
+    print("\n=== Raw Data Demonstration ===")
     print("\nSample Before Cleaning (Benign):")
     print(raw_benign[["ID", "NAME", "CUCKOO_ID", "MALICIOUS"]])
 
     print("\nSample Before Cleaning (Ransom):")
     print(raw_ransom[["ID", "NAME", "CUCKOO_ID", "MALICIOUS"]])
 
-    # Clean data
-    clean_benign, clean_ransom = load_and_clean_files(
+    # Clean and combine data
+    combined_df = load_and_clean_files(
         input_path / "benign.csv", input_path / "ransom.csv"
     )
 
     # Show after cleaning
-    print("\nSample After Cleaning (Benign):")
-    print(clean_benign[["ID", "NAME", "CUCKOO_ID", "MALICIOUS"]].head(3))
-
-    print("\nSample After Cleaning (Ransom):")
-    print(clean_ransom[["ID", "NAME", "CUCKOO_ID", "MALICIOUS"]].head(3))
+    print("\nSample After Cleaning (Combined):")
+    print(combined_df[["ID", "NAME", "CUCKOO_ID", "MALICIOUS"]].head(5))
 
     # Save cleaned data
-    save_cleaned_data(clean_benign, clean_ransom, output_dir)
-    print(f"\nCleaned data saved to: {output_dir}")
+    save_cleaned_data(combined_df, output_dir)
 
 
 if __name__ == "__main__":
@@ -116,10 +124,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output",
         type=str,
-        default="data/processed",
-        help="Output directory for cleaned CSV files",
+        default="data/cleaned",
+        help="Output directory for cleaned CSV and pickle files",
     )
 
     args = parser.parse_args()
-
     cleaning_demo(args.input, args.output)
