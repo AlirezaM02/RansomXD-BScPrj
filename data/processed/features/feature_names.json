@@ -1,0 +1,13 @@
+[
+  "r",
+  "rw",
+  "rx",
+  "rwc",
+  "rwx",
+  "rwxc",
+  "perm_ratio",
+  "complexity_score",
+  "write_ratio",
+  "execute_ratio",
+  "weighted_perm"
+]

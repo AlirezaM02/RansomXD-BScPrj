@@ -1,11 +1,13 @@
+# %%
 # model_training.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
-import pandas as pd
 import pickle
+import json
+from pathlib import Path
 import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
@@ -14,230 +16,301 @@ from sklearn.metrics import (
     confusion_matrix,
     roc_auc_score,
     roc_curve,
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
+    average_precision_score,
 )
-from .preprocess_features import train_test_split
-import json
-import os
+import logging
+import seaborn as sns
+from datetime import datetime
+from sklearn.model_selection import train_test_split
+
+# %%
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 
-def load_preprocessed_data(data_path):
-    """Load preprocessed data from pickle file"""
-    with open(data_path, "rb") as f:
-        data = pickle.load(f)
-    return (
-        data["X_train"],
-        data["X_test"],
-        data["y_train"],
-        data["y_test"],
-        data["feature_names"],
-    )
+# %%
+class RansomwareDetector(nn.Module):
+    """Neural network for ransomware detection"""
 
+    def __init__(self, input_size, hidden_sizes=[128, 64]):
+        super(RansomwareDetector, self).__init__()
 
-def train_random_forest(X_train, y_train):
-    """Train and return Random Forest model"""
-    model = RandomForestClassifier(
-        n_estimators=200,
-        class_weight="balanced",
-        max_depth=10,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train, y_train)
-    return model
+        layers = []
+        prev_size = input_size
 
+        # Build hidden layers
+        for hidden_size in hidden_sizes:
+            layers.extend(
+                [
+                    nn.Linear(prev_size, hidden_size),
+                    nn.ReLU(),
+                    nn.BatchNorm1d(hidden_size),
+                    nn.Dropout(0.3),
+                ]
+            )
+            prev_size = hidden_size
 
-def train_xgboost(X_train, y_train):
-    """Train and return XGBoost model"""
-    model = XGBClassifier(
-        n_estimators=150,
-        learning_rate=0.1,
-        scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1),
-        subsample=0.8,
-        colsample_bytree=0.8,
-        use_label_encoder=False,
-        eval_metric="logloss",
-    )
-    model.fit(X_train, y_train)
-    return model
+        # Output layer
+        layers.append(nn.Linear(prev_size, 1))
+        layers.append(nn.Sigmoid())
 
-
-# Neural Network Architecture
-class MLP(nn.Module):
-    def __init__(self, input_size):
-        super(MLP, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_size, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(64, 1),
-            nn.Sigmoid(),
-        )
+        self.model = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.layers(x)
+        return self.model(x)
 
 
-def train_mlp(X_train, y_train, X_val, y_val):
-    """Train PyTorch MLP model"""
-    # Convert data to PyTorch tensors
-    X_train_tensor = torch.FloatTensor(X_train)
-    y_train_tensor = torch.FloatTensor(y_train).unsqueeze(1)
-    X_val_tensor = torch.FloatTensor(X_val)
-    y_val_tensor = torch.FloatTensor(y_val).unsqueeze(1)
+# %%
+class ModelTrainer:
+    def __init__(self, model_name, device="cpu"):
+        self.model_name = model_name
+        self.device = device
+        self.models_dir = Path("models")
+        self.results_dir = Path("results")
+        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Create datasets and loaders
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+        # Create directories
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize model, loss, and optimizer
-    model = MLP(X_train.shape[1])
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    def load_data(self):
+        """Load preprocessed data"""
+        try:
+            base_dir = (
+                Path(__file__).resolve().parent
+            )  # Move up two levels from current file
+            data_path = base_dir / "data/processed/preprocessed_dataset.pkl"
+            with open(data_path, "rb") as f:
+                data = pickle.load(f)
+            logger.info("Successfully loaded preprocessed data")
+            return data
+        except Exception as e:
+            logger.error(f"Error loading data: {str(e)}")
+            raise
 
-    # Training loop with early stopping
-    best_val_recall = 0
-    patience_counter = 0
-    patience = 5
-
-    for epoch in range(100):
-        model.train()
-        for inputs, labels in train_loader:
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            val_outputs = model(X_val_tensor)
-            val_preds = (val_outputs > 0.5).float()
-            val_recall = recall_score(y_val, val_preds.numpy())
-
-            # Early stopping
-            if val_recall > best_val_recall:
-                best_val_recall = val_recall
-                patience_counter = 0
-                best_weights = model.state_dict()
-            else:
-                patience_counter += 1
-
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
-
-    # Load best weights
-    model.load_state_dict(best_weights)
-    return model
-
-
-def evaluate_model(model, X_test, y_test, model_name):
-    """Evaluate model and return metrics"""
-    if isinstance(model, MLP):  # PyTorch model
-        with torch.no_grad():
-            X_test_tensor = torch.FloatTensor(X_test)
-            y_pred_proba = model(X_test_tensor).numpy()
-            y_pred = (y_pred_proba > 0.5).astype(int)
-    else:  # Traditional models
-        y_pred = model.predict(X_test)
-
-    return {
-        "model": model_name,
-        "accuracy": accuracy_score(y_test, y_pred),
-        "precision": precision_score(y_test, y_pred),
-        "recall": recall_score(y_test, y_pred),
-        "f1": f1_score(y_test, y_pred),
-        "roc_auc": roc_auc_score(y_test, y_pred),
-        "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
-        "classification_report": classification_report(
-            y_test, y_pred, output_dict=True
-        ),
-    }
-
-
-def save_model(model, model_name):
-    """Save trained model to disk"""
-    models_dir = "models"
-    os.makedirs(models_dir, exist_ok=True)
-
-    if isinstance(model, MLP):
-        torch.save(model.state_dict(), os.path.join(models_dir, f"{model_name}.pth"))
-    else:
-        with open(os.path.join(models_dir, f"{model_name}.pkl"), "wb") as f:
-            pickle.dump(model, f)
-
-
-def plot_roc_curves(models, X_test, y_test):
-    """Plot ROC curves for each model"""
-    plt.figure(figsize=(10, 8))
-    for name, model in models.items():
-        if isinstance(model, MLP):
-            with torch.no_grad():
-                X_test_tensor = torch.FloatTensor(X_test)
-                y_pred_proba = model(X_test_tensor).numpy()
-        else:
-            y_pred_proba = model.predict_proba(X_test)[:, 1]
-        fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-        auc = roc_auc_score(y_test, y_pred_proba)
-        plt.plot(fpr, tpr, label=f"{name} (AUC = {auc:.2f})")
-
-
-def main():
-    # Load preprocessed data
-    X_train, X_test, y_train, y_test, feature_names = load_preprocessed_data(
-        "data/processed/dataset.pkl"
-    )
-
-    # Split validation set from training data
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train, y_train, test_size=0.2, stratify=y_train, random_state=42
-    )
-
-    # Train models
-    models = {
-        "RandomForest": train_random_forest(X_train, y_train),
-        "XGBoost": train_xgboost(X_train, y_train),
-    }
-
-    # Train MLP
-    mlp_model, mlp_history = train_mlp(X_train, y_train, X_val, y_val)
-    models["MLP"] = mlp_model
-
-    # Evaluate models
-    metrics = []
-    for name, model in models.items():
-        model_metrics = evaluate_model(model, X_test, y_test, name)
-        metrics.append(model_metrics)
-        save_model(model, name)
-
-        # Save and visualize results
-        save_results(metrics)
-        plot_roc_curves(models, X_test, y_test)
-
-        # Print summary
-        print("\n=== Model Performance Summary ===")
-
-        plt.plot([0, 1], [0, 1], "k--", label="Baseline")
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("ROC Curves")
-        plt.legend()
-        plt.savefig("reports/roc_curves.png")
-        plt.show()
-    print(
-        pd.DataFrame(metrics).drop(
-            ["confusion_matrix", "classification_report"], axis=1
+    def train_random_forest(self, X_train, y_train):
+        """Train Random Forest model"""
+        logger.info("Training Random Forest model...")
+        model = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=10,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=-1,
         )
-    )
+        model.fit(X_train, y_train)
+        return model
+
+    def train_xgboost(self, X_train, y_train):
+        """Train XGBoost model"""
+        logger.info("Training XGBoost model...")
+        model = XGBClassifier(
+            n_estimators=150,
+            max_depth=6,
+            learning_rate=0.1,
+            scale_pos_weight=np.sum(y_train == 0) / np.sum(y_train == 1),
+            random_state=42,
+        )
+        model.fit(X_train, y_train)
+        return model
+
+    def train_neural_net(self, X_train, y_train, X_val, y_val):
+        """Train Neural Network model"""
+        logger.info("Training Neural Network model...")
+        input_size = X_train.shape[1]
+        model = RansomwareDetector(input_size).to(self.device)
+
+        # Create data loaders
+        train_loader = DataLoader(
+            TensorDataset(
+                torch.FloatTensor(X_train).to(self.device),
+                torch.FloatTensor(y_train).reshape(-1, 1).to(self.device),
+            ),
+            batch_size=64,
+            shuffle=True,
+        )
+
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", patience=5
+        )
+
+        best_val_auc = 0
+        patience = 10
+        patience_counter = 0
+
+        for epoch in range(100):
+            model.train()
+            total_loss = 0
+
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                outputs = model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+
+            # Validation
+            model.eval()
+            with torch.no_grad():
+                val_outputs = model(torch.FloatTensor(X_val).to(self.device))
+                val_auc = roc_auc_score(y_val, val_outputs.cpu().numpy())
+
+                scheduler.step(val_auc)
+
+                if val_auc > best_val_auc:
+                    best_val_auc = val_auc
+                    best_state = model.state_dict()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= patience:
+                    logger.info(f"Early stopping at epoch {epoch}")
+                    break
+
+            if (epoch + 1) % 10 == 0:
+                logger.info(
+                    f"Epoch {epoch + 1}, Loss: {total_loss / len(train_loader):.4f}, Val AUC: {val_auc:.4f}"
+                )
+
+        model.load_state_dict(best_state)
+        return model
+
+    def evaluate_model(self, model, X_test, y_test):
+        """Evaluate model performance"""
+        if isinstance(model, nn.Module):
+            model.eval()
+            with torch.no_grad():
+                y_pred_proba = (
+                    model(torch.FloatTensor(X_test).to(self.device)).cpu().numpy()
+                )
+                y_pred = (y_pred_proba > 0.5).astype(int)
+        else:
+            y_pred = model.predict(X_test)
+            y_pred_proba = model.predict_proba(X_test)[:, 1]
+
+        # Calculate metrics
+        results = {
+            "accuracy": float(np.mean(y_pred == y_test)),
+            "roc_auc": float(roc_auc_score(y_test, y_pred_proba)),
+            "avg_precision": float(average_precision_score(y_test, y_pred_proba)),
+            "confusion_matrix": confusion_matrix(y_test, y_pred).tolist(),
+            "classification_report": classification_report(
+                y_test, y_pred, output_dict=True
+            ),
+        }
+
+        # Generate plots
+        self._generate_plots(y_test, y_pred, y_pred_proba)
+
+        return results
+
+    def _generate_plots(self, y_true, y_pred, y_pred_proba):
+        """Generate and save evaluation plots"""
+        # Create figure with subplots
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+
+        # ROC curve
+        fpr, tpr, _ = roc_curve(y_true, y_pred_proba)
+        ax1.plot(fpr, tpr)
+        ax1.plot([0, 1], [0, 1], "k--")
+        ax1.set_xlabel("False Positive Rate")
+        ax1.set_ylabel("True Positive Rate")
+        ax1.set_title("ROC Curve")
+
+        # Confusion matrix
+        cm = confusion_matrix(y_true, y_pred)
+        sns.heatmap(cm, annot=True, fmt="d", ax=ax2)
+        ax2.set_xlabel("Predicted")
+        ax2.set_ylabel("True")
+        ax2.set_title("Confusion Matrix")
+
+        # Save plot
+        plt.tight_layout()
+        plt.savefig(self.results_dir / f"{self.model_name}_{self.timestamp}_plots.png")
+        plt.close()
+
+    def save_results(self, results):
+        """Save evaluation results"""
+        results_file = (
+            self.results_dir / f"{self.model_name}_{self.timestamp}_results.json"
+        )
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=4)
+        logger.info(f"Results saved to {results_file}")
+
+    def save_model(self, model):
+        """Save trained model"""
+        model_file = self.models_dir / f"{self.model_name}_{self.timestamp}_model"
+
+        if isinstance(model, nn.Module):
+            torch.save(model.state_dict(), str(model_file) + ".pth")
+        else:
+            with open(str(model_file) + ".pkl", "wb") as f:
+                pickle.dump(model, f)
+
+        logger.info(f"Model saved to {model_file}")
 
 
+# %%
+def main():
+    try:
+        # Set device
+        device = torch.device("cpu")
+        logger.info(f"Using device: {device}")
+
+        # Initialize trainers
+        trainers = {
+            "random_forest": ModelTrainer("random_forest", device),
+            "xgboost": ModelTrainer("xgboost", device),
+            "neural_net": ModelTrainer("neural_net", device),
+        }
+
+        # Train and evaluate all models
+        for name, trainer in trainers.items():
+            logger.info(f"\nTraining {name} model...")
+
+            # Load data
+            data = trainer.load_data()
+            X_train = data["X_train"]
+            X_test = data["X_test"]
+            y_train = data["y_train"]
+            y_test = data["y_test"]
+
+            # Train appropriate model
+            if name == "random_forest":
+                model = trainer.train_random_forest(X_train, y_train)
+            elif name == "xgboost":
+                model = trainer.train_xgboost(X_train, y_train)
+            else:  # neural_net
+                # Create validation split for neural net
+                X_train_nn, X_val, y_train_nn, y_val = train_test_split(
+                    X_train, y_train, test_size=0.2, stratify=y_train
+                )
+                model = trainer.train_neural_net(X_train_nn, y_train_nn, X_val, y_val)
+
+            # Evaluate and save results
+            results = trainer.evaluate_model(model, X_test, y_test)
+            trainer.save_results(results)
+            trainer.save_model(model)
+
+            # Log summary metrics
+            logger.info(f"\n{name.upper()} Results:")
+            logger.info(f"ROC AUC: {results['roc_auc']:.4f}")
+            logger.info(f"Average Precision: {results['avg_precision']:.4f}")
+            logger.info(f"Accuracy: {results['accuracy']:.4f}")
+
+    except Exception as e:
+        logger.error(f"Error in main: {str(e)}")
+        raise
+
+
+# %%
 if __name__ == "__main__":
     main()
