@@ -1,3 +1,8 @@
+# %% [markdown]
+# # Ransomware detection using Intelligent Methods - Isfahan University of Technology
+# ### Alireza Mirzaei - BSC Project
+# ### Winter of 1403 - Spring of 2025
+
 # %%
 # model_training.py
 import torch
@@ -29,6 +34,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 # %%
@@ -68,8 +74,8 @@ class ModelTrainer:
     def __init__(self, model_name, device="cpu"):
         self.model_name = model_name
         self.device = device
-        self.models_dir = Path("models")
-        self.results_dir = Path("results")
+        self.models_dir = BASE_DIR / Path("models")
+        self.results_dir = BASE_DIR / Path("results")
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Create directories
@@ -79,11 +85,9 @@ class ModelTrainer:
     def load_data(self):
         """Load preprocessed data"""
         try:
-            base_dir = (
-                Path(__file__).resolve().parent
-            )  # Move up two levels from current file
-            data_path = base_dir / "data/processed/preprocessed_dataset.pkl"
-            with open(data_path, "rb") as f:
+            with open(
+                BASE_DIR / "data/processed/features/preprocessed_dataset.pkl", "rb"
+            ) as f:
                 data = pickle.load(f)
             logger.info("Successfully loaded preprocessed data")
             return data
@@ -126,7 +130,7 @@ class ModelTrainer:
         # Create data loaders
         train_loader = DataLoader(
             TensorDataset(
-                torch.FloatTensor(X_train).to(self.device),
+                torch.FloatTensor(X_train).to(self.device),  # Direct numpy conversion
                 torch.FloatTensor(y_train).reshape(-1, 1).to(self.device),
             ),
             batch_size=64,
@@ -195,6 +199,8 @@ class ModelTrainer:
             y_pred = model.predict(X_test)
             y_pred_proba = model.predict_proba(X_test)[:, 1]
 
+        y_test = np.asarray(y_test).ravel()  # flatten the y_test
+
         # Calculate metrics
         results = {
             "accuracy": float(np.mean(y_pred == y_test)),
@@ -247,7 +253,8 @@ class ModelTrainer:
 
     def save_model(self, model):
         """Save trained model"""
-        model_file = self.models_dir / f"{self.model_name}_{self.timestamp}_model"
+        n = 1
+        model_file = self.models_dir / f"batch{n}/{self.model_name}_model"
 
         if isinstance(model, nn.Module):
             torch.save(model.state_dict(), str(model_file) + ".pth")
@@ -314,3 +321,5 @@ def main():
 # %%
 if __name__ == "__main__":
     main()
+
+# %%
