@@ -391,7 +391,7 @@ class ModelTrainer:
         axes[0, 0].plot([0, 1], [0, 1], "k--")
         axes[0, 0].set_xlabel("False Positive Rate")
         axes[0, 0].set_ylabel("True Positive Rate")
-        axes[0, 0].set_title("ROC Curve")
+        axes[0, 0].set_title(f"{self.model_name} ROC Curve")
         axes[0, 0].legend(loc="lower right")
 
         # Precision-Recall curve
@@ -400,7 +400,7 @@ class ModelTrainer:
         axes[0, 1].plot(recall, precision, label=f"AUC = {pr_auc:.3f}")
         axes[0, 1].set_xlabel("Recall")
         axes[0, 1].set_ylabel("Precision")
-        axes[0, 1].set_title("Precision-Recall Curve")
+        axes[0, 1].set_title(f"{self.model_name} Precision-Recall Curve")
         axes[0, 1].legend(loc="lower left")
 
         # Confusion matrix
@@ -408,7 +408,7 @@ class ModelTrainer:
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=axes[1, 0])
         axes[1, 0].set_xlabel("Predicted")
         axes[1, 0].set_ylabel("True")
-        axes[1, 0].set_title("Confusion Matrix")
+        axes[1, 0].set_title(f"{self.model_name} Confusion Matrix")
 
         # Classification threshold analysis
         thresholds = np.linspace(0, 1, 100)
@@ -431,7 +431,7 @@ class ModelTrainer:
         axes[1, 1].plot(thresholds, recalls, label="Recall")
         axes[1, 1].set_xlabel("Threshold")
         axes[1, 1].set_ylabel("Score")
-        axes[1, 1].set_title("Metrics vs. Classification Threshold")
+        axes[1, 1].set_title(f"{self.model_name} Metrics vs. Classification Threshold")
         axes[1, 1].legend()
 
         # Save plot

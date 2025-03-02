@@ -1,3 +1,9 @@
+#latex 
+*.aux
+*.toc
+*.synctex.gz
+fonts/
+
 #protobuf-compiled
 *_pb2.py
 *_pb2_grpc.py

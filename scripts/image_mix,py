@@ -1,0 +1,92 @@
+from PIL import Image
+from pathlib import Path
+import logging
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def mix_images():
+    """
+    For each metric defined in the 'metrics' dictionary, crop the corresponding quadrant
+    (row, column) from each model image and combine these crops into a single 2x2 grid.
+
+    The metrics dictionary uses:
+      - (0, 0): Top-left quadrant (e.g., ROC curve)
+      - (0, 1): Top-right quadrant (e.g., PR curve)
+      - (1, 0): Bottom-left quadrant (e.g., Confusion Matrix)
+    """
+    try:
+        results_dir = BASE_DIR / "images"
+        metrics = {
+            "roc_curve": (0, 0),
+            "pr_curve": (0, 1),
+            "confusion_matrix": (1, 0),
+        }
+        model_names = [
+            "random_forest",
+            "xgboost",
+            "neural_net",
+            "neural_net_cv",
+        ]
+
+        # Process each metric separately.
+        for metric, (row, col) in metrics.items():
+            images = []
+            for model in model_names:
+                img_path = results_dir / f"{model}_plots.png"
+                if img_path.exists():
+                    img = Image.open(img_path)
+                    images.append(img)
+                else:
+                    logger.warning(f"Missing image: {img_path}")
+                    return
+
+            # Assume all images are the same size; get dimensions from first image.
+            full_width, full_height = images[0].size
+            quadrant_width = full_width // 2
+            quadrant_height = full_height // 2
+
+            # Determine crop box for the given quadrant.
+            left = col * quadrant_width
+            upper = row * quadrant_height
+            crop_box = (left, upper, left + quadrant_width, upper + quadrant_height)
+
+            # Crop the specified quadrant from each image.
+            cropped_images = [img.crop(crop_box) for img in images]
+
+            # Create a new blank canvas for a 2x2 grid.
+            combined_width = quadrant_width * 2
+            combined_height = quadrant_height * 2
+            combined_image = Image.new(
+                "RGB", (combined_width, combined_height), "white"
+            )
+
+            # Define positions for the 2x2 grid.
+            positions = [
+                (0, 0),  # Top-left
+                (quadrant_width, 0),  # Top-right
+                (0, quadrant_height),  # Bottom-left
+                (quadrant_width, quadrant_height),  # Bottom-right
+            ]
+
+            # Paste each cropped image into the grid.
+            for cropped_img, pos in zip(cropped_images, positions):
+                combined_image.paste(cropped_img, pos)
+
+            # Save the combined image.
+            output_path = results_dir / f"combined_{metric}.png"
+            combined_image.save(output_path)
+            logger.info(f"Saved combined {metric} image at {output_path}")
+
+    except Exception as e:
+        logger.error(f"Error combining images: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    mix_images()
