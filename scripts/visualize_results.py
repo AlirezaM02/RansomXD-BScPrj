@@ -14,7 +14,9 @@ from pathlib import Path
 from sklearn.inspection import permutation_importance
 from typing import Dict, Tuple, List
 import shap
+import json
 import logging
+import gc
 
 # %% Configure logging
 logging.basicConfig(
@@ -22,20 +24,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-FEATURES = [
-    "r",
-    "rw",
-    "rx",
-    "rwc",
-    "rwx",
-    "rwxc",
-    "perm_ratio",
-    "complexity_score",
-    "write_ratio",
-    "execute_ratio",
-    "weighted_perm",
-]
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+FEATURES = []
+with open(BASE_DIR / "data/processed/features/feature_names.json") as file:
+    features = json.load(file)
+    FEATURES = features.copy()
 
 
 # %% Ransomware Visualizer
@@ -62,14 +56,23 @@ class RansomwareVisualizer:
         plt.style.use("seaborn-v0_8")
         self.colors = sns.color_palette("husl", 8)
 
+        # Data cache
+        self._data_cache = None
+
     def load_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Load and combine training and test data"""
+        """Load and combine training and test data with caching"""
+        if self._data_cache is not None:
+            return self._data_cache
+
         try:
             with open(self.data_path, "rb") as f:
                 data = pickle.load(f)
             X = np.concatenate([data["X_train"], data["X_test"]])
             y = np.concatenate([data["y_train"], data["y_test"]])
             logger.info(f"Data loaded successfully. Shape: {X.shape}")
+
+            # Cache the data to avoid repeated loading
+            self._data_cache = (X, y)
             return X, y
         except Exception as e:
             logger.error(f"Error loading data: {e}")
@@ -95,12 +98,18 @@ class RansomwareVisualizer:
         plt.xlabel("Class (0: Benign, 1: Ransomware)")
         plt.ylabel("Count")
         self._save_plot("class_distribution.png")
+        plt.close()  # Explicitly close the figure
 
     def plot_feature_correlations(self, X: np.ndarray):
         """Plot enhanced correlation matrix with annotations"""
-        corr = pd.DataFrame(
-            np.corrcoef(X.T), columns=self.feature_names, index=self.feature_names
-        )
+        # Convert to DataFrame if not already
+        if not isinstance(X, pd.DataFrame):
+            X_df = pd.DataFrame(X, columns=self.feature_names)
+        else:
+            X_df = X
+
+        # Calculate correlation matrix
+        corr = X_df.corr()
 
         plt.figure(figsize=(12, 10))
         mask = np.triu(np.ones_like(corr), k=1)
@@ -115,6 +124,11 @@ class RansomwareVisualizer:
         )
         plt.title("Feature Correlation Matrix")
         self._save_plot("feature_correlations.png")
+        plt.close()
+
+        # Help garbage collection
+        del corr, X_df
+        gc.collect()
 
     def plot_model_comparison(self, results_dict: Dict[str, Dict]):
         """Plot comparison of multiple models' performance metrics"""
@@ -136,53 +150,72 @@ class RansomwareVisualizer:
         ax.legend()
         plt.tight_layout()
         self._save_plot("model_comparison.png")
+        plt.close()
 
-    def plot_feature_importance_analysis(
+    def plot_feature_importance(
         self, model, X: np.ndarray, y: np.ndarray, model_name: str
     ):
-        """Enhanced feature importance analysis with statistical testing"""
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+        """Memory-optimized feature importance visualization"""
+        plt.figure(figsize=(12, 6))
 
-        # Built-in importance
+        # Use built-in feature importance if available
         if hasattr(model, "feature_importances_"):
             importances = model.feature_importances_
-            std = np.std(
-                [tree.feature_importances_ for tree in model.estimators_], axis=0
-            )
-            indices = np.argsort(importances)[::-1]
+            indices = np.argsort(importances)[-15:]  # Only top 15 features for clarity
 
-            ax1.bar(
-                range(len(importances)),
-                importances[indices],
-                yerr=std[indices],
-                color=self.colors[0],
-                align="center",
-            )
-            ax1.set_title(f"{model_name} Feature Importance (MDI)")
-            ax1.set_xticks(range(len(importances)))
-            ax1.set_xticklabels(
-                [self.feature_names[i] for i in indices], rotation=45, ha="right"
-            )
+            plt.barh(range(len(indices)), importances[indices], align="center")
+            plt.yticks(range(len(indices)), [self.feature_names[i] for i in indices])
+            plt.title(f"{model_name} - Top Feature Importance")
+            plt.xlabel("Importance")
+            self._save_plot(f"{model_name}_feature_importance.png")
+            plt.close()
 
-        # Permutation importance
-        r = permutation_importance(model, X, y, n_repeats=10, random_state=42)
-        sorted_idx = r.importances_mean.argsort()
+        # Permutation importance (more memory-efficient than SHAP)
+        r = permutation_importance(model, X, y, n_repeats=5, random_state=42)
+        indices = np.argsort(r.importances_mean)[-15:]  # Only top 15
 
-        ax2.boxplot(
-            [r.importances[sorted_idx[i]] for i in range(X.shape[1])],
-            vert=False,
-            labels=[self.feature_names[i] for i in sorted_idx],
+        plt.figure(figsize=(12, 6))
+        plt.barh(range(len(indices)), r.importances_mean[indices], align="center")
+        plt.yticks(range(len(indices)), [self.feature_names[i] for i in indices])
+        plt.title(f"{model_name} - Permutation Importance")
+        plt.xlabel("Mean decrease in accuracy")
+        self._save_plot(f"{model_name}_permutation_importance.png")
+        plt.close()
+
+    def plot_reduced_feature_distributions(self, X: np.ndarray, y: np.ndarray):
+        """Plot distributions for only the most important features"""
+        # Select only top features to plot - reduces memory usage
+        top_features_idx = np.argsort(np.var(X, axis=0))[
+            -6:
+        ]  # Select 6 most variable features
+        top_features = [self.feature_names[i] for i in top_features_idx]
+
+        # Create DataFrame with only selected features
+        df = pd.DataFrame(
+            {feature: X[:, i] for i, feature in zip(top_features_idx, top_features)}
         )
-        ax2.set_title("Permutation Importance")
+        df["target"] = y
+
+        # Create figure with fewer subplots
+        fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+        axes = axes.flatten()
+
+        for i, feature in enumerate(top_features):
+            sns.histplot(data=df, x=feature, hue="target", kde=True, ax=axes[i])
+            axes[i].set_title(f"{feature} Distribution by Class")
 
         plt.tight_layout()
-        self._save_plot(f"{model_name}_feature_importance.png")
+        self._save_plot("top_feature_distributions.png")
+        plt.close()
+
+        # Clean up
+        del df
+        gc.collect()
 
     def _save_plot(self, filename: str):
         """Helper method to save plots with consistent settings"""
         try:
-            plt.savefig(self.results_dir / filename, dpi=300, bbox_inches="tight")
-            plt.close()
+            plt.savefig(self.results_dir / filename, dpi=200, bbox_inches="tight")
             logger.info(f"Plot saved successfully: {filename}")
         except Exception as e:
             logger.error(f"Error saving plot {filename}: {e}")
@@ -321,7 +354,7 @@ class FeatureAnalyzer:
 
 # %% Main function
 def main():
-    """Main execution function"""
+    """Main execution function with enhanced visualizations"""
     # Configuration
     config = {
         "data_path": BASE_DIR / "data/processed/features/preprocessed_dataset.pkl",
@@ -332,42 +365,45 @@ def main():
 
     # Initialize visualizer
     visualizer = RansomwareVisualizer(config)
-    feature_analyzer = FeatureAnalyzer(FEATURES)
 
     try:
-        # Load data
+        # Load data (only once)
         X, y = visualizer.load_data()
 
-        # Generate visualizations
+        # Generate basic visualizations
         visualizer.plot_class_distribution(y)
         visualizer.plot_feature_correlations(X)
+        visualizer.plot_reduced_feature_distributions(X, y)
 
-        # Load and analyze model
-        with open(config["models_dir"] / "random_forest_model.pkl", "rb") as f:
-            rf_model = pickle.load(f)
+        # Process one model at a time to reduce memory usage
+        model_paths = {
+            "random_forest": config["models_dir"] / "random_forest_model.pkl",
+            "xgboost": config["models_dir"] / "xgboost_model.pkl",
+        }
 
-        # Analyze features
-        logger.info(
-            f"Feature Correlation Analysis {feature_analyzer.analyze_correlations(X)}\n"
-        )
-        logger.info(
-            f"Feature Importance Analysis {
-                feature_analyzer.analyze_feature_importance(rf_model, X, y)
-            }\n"
-        )
+        for model_name, path in model_paths.items():
+            if not path.exists():
+                logger.warning(f"Model not found: {path}")
+                continue
 
-        logger.info(
-            f"Feature Importance Analysis {
-                feature_analyzer.feature_distributions(X, y)
-            }\n"
-        )
+            logger.info(f"Processing {model_name} model")
 
-        visualizer.plot_feature_importance_analysis(rf_model, X, y, "RandomForest")
+            # Load model
+            with open(path, "rb") as f:
+                model = pickle.load(f)
+
+            # Analyze model
+            visualizer.plot_feature_importance(model, X, y, model_name)
+
+            # Clean up to free memory
+            del model
+            gc.collect()
 
         logger.info("All visualizations completed successfully")
 
     except Exception as e:
         logger.error(f"Error in main execution: {e}")
+        logger.exception("Detailed error information:")
 
 
 # %% Main Execution
